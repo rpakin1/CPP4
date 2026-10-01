@@ -43,225 +43,10 @@ def assign_box_colors(df_box):
 
 
 # ------------------------------------------------------------------------------
-# 3. CORE EMPTY SPACE & MAXIMAL MERGING ENGINE (L-SHAPE & OVERLAP SUPPORT)
-# ------------------------------------------------------------------------------
-class EmptySpace:
-
-  def __init__(
-      self,
-      x1,
-      y1,
-      z1,
-      x2,
-      y2,
-      z2,
-      lbs_z_limit=float("inf"),
-      base_lbs_density=float("inf"),
-  ):
-    self.x1, self.y1, self.z1 = x1, y1, z1
-    self.x2, self.y2, self.z2 = x2, y2, z2
-    self.width = max(0.0, x2 - x1)
-    self.length = max(0.0, y2 - y1)
-    self.height = max(0.0, z2 - z1)
-    self.lbs_z = lbs_z_limit
-    self.base_lbs_density = base_lbs_density
-
-
-def remove_dominated_spaces(space_list):
-  """ลบพื้นที่ว่างย่อยที่ถูกพื้นที่ว่างอื่นที่มีขนาดใหญ่กว่าครอบไว้ 100% (Non-Dominated Filtering)"""
-  filtered_spaces = []
-  for i, s1 in enumerate(space_list):
-    is_dominated = False
-    for j, s2 in enumerate(space_list):
-      if i != j:
-        # เช็กว่า s1 ซ่อนอยู่ภายใน s2 ทั้งหมดหรือไม่
-        if (
-            s2.x1 <= s1.x1 + 0.01
-            and s2.x2 >= s1.x2 - 0.01
-            and s2.y1 <= s1.y1 + 0.01
-            and s2.y2 >= s1.y2 - 0.01
-            and s2.z1 <= s1.z1 + 0.01
-            and s2.z2 >= s1.z2 - 0.01
-        ):
-          is_dominated = True
-          break
-    if not is_dominated:
-      filtered_spaces.append(s1)
-  return filtered_spaces
-
-
-def generate_maximal_empty_spaces(space_list):
-  """สร้าง Maximal Empty Spaces (MES) เพื่อรองรับพื้นที่ L-Shape และการวางคร่อมซ้อนทับบางส่วน"""
-  if len(space_list) <= 1:
-    return space_list
-
-  maximal_spaces = list(space_list)
-  added_new = True
-
-  while added_new:
-    added_new = False
-    new_candidates = []
-
-    for i in range(len(maximal_spaces)):
-      for j in range(i + 1, len(maximal_spaces)):
-        s1 = maximal_spaces[i]
-        s2 = maximal_spaces[j]
-
-        # รวมเฉพาะพื้นที่ที่อยู่ระดับความสูงเดียวกัน (Z เดียวกัน)
-        if abs(s1.z1 - s2.z1) < 0.1 and abs(s1.z2 - s2.z2) < 0.1:
-          ox = max(0, min(s1.x2, s2.x2) - max(s1.x1, s2.x1))
-          oy = max(0, min(s1.y2, s2.y2) - max(s1.y1, s2.y1))
-
-          # ถ้าพื้นที่แตะกันหรือซ้อนทับกัน (เกิด L-Shape)
-          if (
-              ox > 0 or oy > 0 or abs(s1.x2 - s2.x1) < 0.1 or abs(s1.y2 - s2.y1) < 0.1
-          ):
-            # สร้าง Maximal Space แนว X (ขยายความกว้างเต็มขอบ)
-            if max(s1.y1, s2.y1) < min(s1.y2, s2.y2):
-              mx_space = EmptySpace(
-                  min(s1.x1, s2.x1),
-                  max(s1.y1, s2.y1),
-                  s1.z1,
-                  max(s1.x2, s2.x2),
-                  min(s1.y2, s2.y2),
-                  s1.z2,
-                  lbs_z_limit=min(s1.lbs_z, s2.lbs_z),
-                  base_lbs_density=min(
-                      s1.base_lbs_density, s2.base_lbs_density
-                  ),
-              )
-              if mx_space.width > 0 and mx_space.length > 0:
-                new_candidates.append(mx_space)
-
-            # สร้าง Maximal Space แนว Y (ขยายความยาวเต็มขอบ)
-            if max(s1.x1, s2.x1) < min(s1.x2, s2.x2):
-              my_space = EmptySpace(
-                  max(s1.x1, s2.x1),
-                  min(s1.y1, s2.y1),
-                  s1.z1,
-                  min(s1.x2, s2.x2),
-                  max(s1.y2, s2.y2),
-                  s1.z2,
-                  lbs_z_limit=min(s1.lbs_z, s2.lbs_z),
-                  base_lbs_density=min(
-                      s1.base_lbs_density, s2.base_lbs_density
-                  ),
-              )
-              if my_space.width > 0 and my_space.length > 0:
-                new_candidates.append(my_space)
-
-    if new_candidates:
-      before_count = len(maximal_spaces)
-      maximal_spaces = remove_dominated_spaces(maximal_spaces + new_candidates)
-      if len(maximal_spaces) > before_count:
-        added_new = True
-
-  return remove_dominated_spaces(maximal_spaces)
-
-
-def cut_overlapping_spaces(space_list, new_box):
-  """เมื่อมีการวางกล่องใหม่ ให้ตัดพื้นที่ว่างใน space_list ที่ทับซ้อนกับกล่องใหม่ออกทันที (Difference Engine)"""
-  bx1, by1, bz1 = new_box["x1"], new_box["y1"], new_box["z1"]
-  bx2, by2, bz2 = new_box["x2"], new_box["y2"], new_box["z2"]
-
-  updated_spaces = []
-
-  for s in space_list:
-    # เช็กว่าทับซ้อนกับกล่องใหม่ใน 3D หรือไม่
-    ox = max(0, min(s.x2, bx2) - max(s.x1, bx1))
-    oy = max(0, min(s.y2, by2) - max(s.y1, by1))
-    oz = max(0, min(s.z2, bz2) - max(s.z1, bz1))
-
-    if ox > 0 and oy > 0 and oz > 0:
-      # เกิดการทับซ้อน -> แตกพื้นที่ว่างเดิมออกเป็นพื้นที่ย่อยรอบๆ กล่องใหม่
-      if s.x1 < bx1:
-        updated_spaces.append(
-            EmptySpace(
-                s.x1,
-                s.y1,
-                s.z1,
-                bx1,
-                s.y2,
-                s.z2,
-                s.lbs_z,
-                s.base_lbs_density,
-            )
-        )
-      if s.x2 > bx2:
-        updated_spaces.append(
-            EmptySpace(
-                bx2,
-                s.y1,
-                s.z1,
-                s.x2,
-                s.y2,
-                s.z2,
-                s.lbs_z,
-                s.base_lbs_density,
-            )
-        )
-      if s.y1 < by1:
-        updated_spaces.append(
-            EmptySpace(
-                s.x1,
-                s.y1,
-                s.z1,
-                s.x2,
-                by1,
-                s.z2,
-                s.lbs_z,
-                s.base_lbs_density,
-            )
-        )
-      if s.y2 > by2:
-        updated_spaces.append(
-            EmptySpace(
-                s.x1,
-                by2,
-                s.z1,
-                s.x2,
-                s.y2,
-                s.z2,
-                s.lbs_z,
-                s.base_lbs_density,
-            )
-        )
-      if s.z1 < bz1:
-        updated_spaces.append(
-            EmptySpace(
-                s.x1,
-                s.y1,
-                s.z1,
-                s.x2,
-                s.y2,
-                bz1,
-                s.lbs_z,
-                s.base_lbs_density,
-            )
-        )
-      if s.z2 > bz2:
-        updated_spaces.append(
-            EmptySpace(
-                s.x1,
-                s.y1,
-                bz2,
-                s.x2,
-                s.y2,
-                s.z2,
-                s.lbs_z,
-                s.base_lbs_density,
-            )
-        )
-    else:
-      updated_spaces.append(s)
-
-  return remove_dominated_spaces(updated_spaces)
-
-
-# ------------------------------------------------------------------------------
-# 4. CORE SAFETY CHECKS (FLAT BASE & CASCADING MULTI-LAYER LBSz)
+# 3. CORE SAFETY CHECKS (FLAT BASE & CASCADING MULTI-LAYER LBSz)
 # ------------------------------------------------------------------------------
 def has_flat_and_solid_base(x1, y1, z1, bw, bl, placed_boxes):
+  """ตรวจสอบว่ากล่องชั้นบน (Z1 > 0) มีฐานรองรับด้านล่างเต็มพื้นที่เรียบเสมอกัน"""
   if z1 == 0:
     return True
 
@@ -292,6 +77,7 @@ def check_multi_layer_cascade_lbsz(
     candidate_weight,
     placed_boxes,
 ):
+  """คำนวณการถ่ายน้ำหนักสะสมแบบทับซ้อนหลายชั้น (Multi-layer Cascade)"""
   if candidate_z1 == 0:
     return True
 
@@ -352,7 +138,153 @@ def check_multi_layer_cascade_lbsz(
 
 
 # ------------------------------------------------------------------------------
-# 5. CORE DBL ALGORITHM WITH MAXIMAL EMPTY SPACE (MES) ENGINE
+# 4. STABLE SPACE MERGING FUNCTION
+# ------------------------------------------------------------------------------
+class EmptySpace:
+
+  def __init__(
+      self,
+      x1,
+      y1,
+      z1,
+      x2,
+      y2,
+      z2,
+      lbs_z_limit=float("inf"),
+      base_lbs_density=float("inf"),
+  ):
+    self.x1, self.y1, self.z1 = x1, y1, z1
+    self.x2, self.y2, self.z2 = x2, y2, z2
+    self.width = x2 - x1
+    self.length = y2 - y1
+    self.height = z2 - z1
+    self.lbs_z = lbs_z_limit
+    self.base_lbs_density = base_lbs_density
+
+
+def merge_empty_spaces(space_list):
+  """ยุบรวมพื้นที่ว่างขอบชนขอบระนาบเดียวกันอย่างมีเสถียรภาพ"""
+  if len(space_list) <= 1:
+    return space_list
+
+  merged = True
+  while merged:
+    merged = False
+    new_space_list = []
+    skip_indices = set()
+
+    for i in range(len(space_list)):
+      if i in skip_indices:
+        continue
+
+      s1 = space_list[i]
+      merged_s1 = False
+
+      for j in range(i + 1, len(space_list)):
+        if j in skip_indices:
+          continue
+
+        s2 = space_list[j]
+
+        # ยุบรวมตามแนว X
+        if (
+            s1.y1 == s2.y1
+            and s1.y2 == s2.y2
+            and s1.z1 == s2.z1
+            and s1.z2 == s2.z2
+        ):
+          if abs(s1.x2 - s2.x1) < 0.1:
+            new_space_list.append(
+                EmptySpace(
+                    s1.x1,
+                    s1.y1,
+                    s1.z1,
+                    s2.x2,
+                    s1.y2,
+                    s1.z2,
+                    lbs_z_limit=min(s1.lbs_z, s2.lbs_z),
+                    base_lbs_density=min(
+                        s1.base_lbs_density, s2.base_lbs_density
+                    ),
+                )
+            )
+            skip_indices.update([i, j])
+            merged = merged_s1 = True
+            break
+          elif abs(s2.x2 - s1.x1) < 0.1:
+            new_space_list.append(
+                EmptySpace(
+                    s2.x1,
+                    s1.y1,
+                    s1.z1,
+                    s1.x2,
+                    s1.y2,
+                    s1.z2,
+                    lbs_z_limit=min(s1.lbs_z, s2.lbs_z),
+                    base_lbs_density=min(
+                        s1.base_lbs_density, s2.base_lbs_density
+                    ),
+                )
+            )
+            skip_indices.update([i, j])
+            merged = merged_s1 = True
+            break
+
+        # ยุบรวมตามแนว Y
+        if (
+            s1.x1 == s2.x1
+            and s1.x2 == s2.x2
+            and s1.z1 == s2.z1
+            and s1.z2 == s2.z2
+        ):
+          if abs(s1.y2 - s2.y1) < 0.1:
+            new_space_list.append(
+                EmptySpace(
+                    s1.x1,
+                    s1.y1,
+                    s1.z1,
+                    s1.x2,
+                    s2.y2,
+                    s1.z2,
+                    lbs_z_limit=min(s1.lbs_z, s2.lbs_z),
+                    base_lbs_density=min(
+                        s1.base_lbs_density, s2.base_lbs_density
+                    ),
+                )
+            )
+            skip_indices.update([i, j])
+            merged = merged_s1 = True
+            break
+          elif abs(s2.y2 - s1.y1) < 0.1:
+            new_space_list.append(
+                EmptySpace(
+                    s1.x1,
+                    s2.y1,
+                    s1.z1,
+                    s1.x2,
+                    s1.y2,
+                    s1.z2,
+                    lbs_z_limit=min(s1.lbs_z, s2.lbs_z),
+                    base_lbs_density=min(
+                        s1.base_lbs_density, s2.base_lbs_density
+                    ),
+                )
+            )
+            skip_indices.update([i, j])
+            merged = merged_s1 = True
+            break
+
+      if not merged_s1 and i not in skip_indices:
+        new_space_list.append(s1)
+
+    if merged:
+      space_list = new_space_list
+
+  return space_list
+
+
+# ------------------------------------------------------------------------------
+# 5. CORE DBL ALGORITHM
 # ------------------------------------------------------------------------------
 def run_dbl_algorithm(container_info, user_box_orders, box_colors_map):
   cw = container_info["Width_cm"]
@@ -400,7 +332,6 @@ def run_dbl_algorithm(container_info, user_box_orders, box_colors_map):
   )
 
   while space_list and any(qty > 0 for qty in boxes_in_stock.values()):
-    # เรียงลำดับพื้นที่: ถมกว้าง X -> ยาว Y -> สูง Z
     space_list.sort(key=lambda s: (s.x1, s.y1, s.z1))
     space = space_list.pop(0)
 
@@ -513,7 +444,7 @@ def run_dbl_algorithm(container_info, user_box_orders, box_colors_map):
       box_color = box_colors_map.get(bp["box_id"], "#3380FF")
 
       x1, y1, z1 = space.x1, space.y1, space.z1
-      new_placed_box = {
+      placed_boxes.append({
           "Box_ID": bp["box_id"],
           "Box_Name": b_info["Box_Name"],
           "Customer_Name": b_info["Customer_Name"],
@@ -530,21 +461,17 @@ def run_dbl_algorithm(container_info, user_box_orders, box_colors_map):
           "lbs_z": b_info.get("LBS_z", "N/A"),
           "color": box_color,
           "label": f"{b_info['Box_Name']} | {b_info['Customer_Name']}",
-      }
+      })
 
-      placed_boxes.append(new_placed_box)
       boxes_in_stock[bp["box_id"]] -= 1
 
-      # 1. ตัดพื้นที่ว่างเดิมที่โดนกล่องใหม่วางทับออกทันที (Difference Engine)
-      space_list = cut_overlapping_spaces(space_list, new_placed_box)
-
-      # 2. สร้าง Space B, D, C ใหม่จากการวางกล่องใหม่นี้
-      if x1 + bw < space.x2:
+      # Space B: Right of single box
+      if space.x1 + bw < space.x2:
         space_list.append(
             EmptySpace(
-                x1 + bw,
-                y1,
-                z1,
+                space.x1 + bw,
+                space.y1,
+                space.z1,
                 space.x2,
                 space.y2,
                 space.z2,
@@ -553,13 +480,14 @@ def run_dbl_algorithm(container_info, user_box_orders, box_colors_map):
             )
         )
 
-      if y1 + bl < space.y2:
+      # Space D: Behind single box
+      if space.y1 + bl < space.y2:
         space_list.append(
             EmptySpace(
-                x1,
-                y1 + bl,
-                z1,
-                x1 + bw,
+                space.x1,
+                space.y1 + bl,
+                space.z1,
+                space.x1 + bw,
                 space.y2,
                 space.z2,
                 space.lbs_z,
@@ -567,7 +495,8 @@ def run_dbl_algorithm(container_info, user_box_orders, box_colors_map):
             )
         )
 
-      if z1 + bh < space.z2:
+      # Space C: Directly above single box
+      if space.z1 + bh < space.z2:
         upper_space_lbs = min(
             space.lbs_z - bp["unit_weight"], bp["lbs_z_total"]
         )
@@ -581,11 +510,11 @@ def run_dbl_algorithm(container_info, user_box_orders, box_colors_map):
         if upper_space_lbs > 0:
           space_list.append(
               EmptySpace(
-                  x1,
-                  y1,
-                  z1 + bh,
-                  x1 + bw,
-                  y1 + bl,
+                  space.x1,
+                  space.y1,
+                  space.z1 + bh,
+                  space.x1 + bw,
+                  space.y1 + bl,
                   space.z2,
                   lbs_z_limit=upper_space_lbs,
                   base_lbs_density=min(
@@ -594,8 +523,7 @@ def run_dbl_algorithm(container_info, user_box_orders, box_colors_map):
               )
           )
 
-      # 3. หลอมรวมพื้นที่ว่างเป็น Maximal Empty Spaces ( MES Engine สำหรับ L-Shape )
-      space_list = generate_maximal_empty_spaces(space_list)
+      space_list = merge_empty_spaces(space_list)
 
   unfitted_boxes = []
   for item in user_box_orders:
@@ -912,7 +840,7 @@ with tab_user:
   m1, m2, m3, m4 = st.columns(4)
   m1.metric("📦 Volume Util.", f"{vol_utilization:.2f} %")
   m2.metric(
-      "秤️ Total Weight",
+      "⚖️ Total Weight",
       f"{tot_w:,.1f} kg",
       f"Limit {container_info['Max_Weight_kg']:,.0f} kg"
       f" ({weight_utilization:.1f}%)",
